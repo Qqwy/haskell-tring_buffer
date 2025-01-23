@@ -67,7 +67,7 @@ library
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base ^>=4.19.0.0, array, stm, async, contiguous
+    build-depends:    base ^>=4.19.0.0, array, stm, async
 
     -- Directories containing source files.
     hs-source-dirs:   src

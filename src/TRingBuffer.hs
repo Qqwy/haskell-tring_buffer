@@ -84,10 +84,16 @@ emptyContents cap =
 -- Non-blocking. A worst-case O(1) constant-time operation
 capacity :: TRingBuffer a -> Word
 capacity buf = 
-    let cap = System.IO.Unsafe.unsafePerformIO $ fromIntegral <$> Array.getNumElements buf.contents
+    let cap = System.IO.Unsafe.unsafePerformIO $ capacity' buf
     in
     -- See NOTE [capacity]
         cap - 1
+
+-- For internal use.
+-- Returns the _true_ capacity.
+-- See NOTE [capacity]
+capacity' :: MArray TArray a m => TRingBuffer a -> m Word
+capacity' buf = fromIntegral <$> Array.getNumElements buf.contents
 
 -- | Attempts to add a new element to the TRingBuffer.
 --
@@ -100,7 +106,7 @@ capacity buf =
 -- `pop`/`push`/`tryPop`/`tryPush`
 tryPush :: TRingBuffer a -> a -> STM Bool
 tryPush buf a = do
-  !cap <- fromIntegral <$> Array.getNumElements buf.contents
+  !cap <- capacity' buf
   readIdx <- TVar.readTVar buf.reader
   writeIdx <- TVar.readTVar buf.writer
   let newWriteIdx = (writeIdx + 1) `mod` cap
@@ -121,7 +127,7 @@ tryPush buf a = do
 -- `pop`/`push`/`tryPop`/`tryPush`
 tryPop :: TRingBuffer a -> STM (Maybe a)
 tryPop buf = do
-  !cap <- fromIntegral <$> Array.getNumElements buf.contents
+  !cap <- capacity' buf
   readIdx <- TVar.readTVar buf.reader
   writeIdx <- TVar.readTVar buf.writer
   if readIdx == writeIdx then
