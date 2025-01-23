@@ -88,6 +88,9 @@ emptyContents cap =
 -- uses no STM.
 capacity :: TRingBuffer a -> Word
 capacity buf = 
+    -- SAFETY: Once the array is allocated,
+    -- we never grow or shrink it,
+    -- so this call is outwardly pure
     let cap = System.IO.Unsafe.unsafePerformIO $ capacity' buf
     in
     -- See NOTE [capacity]
