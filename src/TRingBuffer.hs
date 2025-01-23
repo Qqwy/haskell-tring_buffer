@@ -39,7 +39,7 @@ tryPut :: TRingBuffer a -> a -> STM Bool
 tryPut (TRingBuffer r w c) a = do
     w' <- TVar.readTVar w
     r' <- TVar.readTVar r
-    c'<- GHC.Conc.unsafeIOToSTM (IORef.readIORef c)
+    c'<- stmReadIORef c
     let capacity = Array.sizeofArray c'
     if (w' + 1) `mod` capacity == r' then
         -- Buffer is full
@@ -47,7 +47,7 @@ tryPut (TRingBuffer r w c) a = do
     else do
         GHC.Conc.unsafeIOToSTM $  do
             -- marr <- Array.thawArray c' 0 capacity
-            -- I _think_ but am not 100% sure this is allowed:
+            -- I _think_ but am not 100% sure this unsafeThaw is allowed:
             marr <- Array.unsafeThawArray c'
             Array.writeArray marr w' (Just a)
             c'' <- Array.unsafeFreezeArray marr
@@ -64,12 +64,11 @@ tryGet (TRingBuffer r w c) = do
         -- Buffer is empty
         pure Nothing
     else do
-        c'<- GHC.Conc.unsafeIOToSTM (IORef.readIORef c)
+        c' <- stmReadIORef c
         let capacity = Array.sizeofArray c'
         let a = Array.indexArray c' r'
         TVar.writeTVar r ((r' + 1) `mod` capacity)
         pure a
-
 
 put :: TRingBuffer a -> a -> STM ()
 put buf a = do
@@ -87,3 +86,6 @@ get buf = do
 -- capacity (TRingBuffer _r _w c) = System.IO.Unsafe.unsafePerformIO $ do
 --     c' <- IORef.readIORef c
 --     pure $ Array.sizeofArray c'
+
+stmReadIORef :: IORef a -> STM a
+stmReadIORef = GHC.Conc.unsafeIOToSTM . IORef.readIORef
