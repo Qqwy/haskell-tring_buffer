@@ -108,9 +108,6 @@ tryPop buf = do
       pure Nothing
   else do
       a <- unsafeReadElem buf readIdx
-      -- Not strictly necessary, but not overwriting elements we take out
-      -- might delay them being GC'd
-      unsafeWriteElem buf readIdx emptyElem
       let newReadIdx = (readIdx + 1) `mod` cap
       TVar.writeTVar buf.reader newReadIdx
       pure (Just a)
