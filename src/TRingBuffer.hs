@@ -1,3 +1,6 @@
+-- | TRingBuffer: A Bounded Concurrent STM-based FIFO queue
+--
+-- This module is intended to be imported qualified.
 {-# LANGUAGE GHC2021 #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 module TRingBuffer 
@@ -33,7 +36,7 @@ import Data.Array.Base qualified as Array
 import System.IO.Unsafe qualified
 
 
--- | A Bounded concurrent FIFO queue, built on top of STM (using TVars).
+-- | A Bounded Concurrent STM-based FIFO Queue, implemented as a Ring Buffer
 --
 -- Goals of this datastructure:
 -- - Easy to use; no hidden footguns
@@ -72,16 +75,17 @@ emptyIO cap = do
 
 emptyContents :: (MArray a1 e m, Ix i, Integral a2, Num i) => a2 -> m (a1 i e)
 emptyContents cap = 
-    -- NOTE [capacity]: We allocate one element more than the passed capacity.
-    -- This extra slot allows us to disambiguate the 'completely full'
-    -- and 'completely empty' cases.
-    -- Therefore, when communicating the capacity to the user,
-    -- we need to subtract 1 again.
+    -- NOTE [capacity]: The size of the allocated array
+    -- is one more than the user-specified capacity.
+    -- This is necessary because if the buffer is completely full,
+    -- we still want the write index to be one less than the read index.
+    -- (Otherwise it would be indistinguishable from the 'buffer completely empty' case).
     Array.newArray (0, fromIntegral (cap + 1)) emptyElem
 
 -- | Check the maximum number of elements that can be stored in this TRingBuffer
 --
--- Non-blocking. A worst-case O(1) constant-time operation
+-- Non-blocking. A worst-case O(1) constant-time operation,
+-- uses no STM.
 capacity :: TRingBuffer a -> Word
 capacity buf = 
     let cap = System.IO.Unsafe.unsafePerformIO $ capacity' buf
@@ -89,9 +93,7 @@ capacity buf =
     -- See NOTE [capacity]
         cap - 1
 
--- For internal use.
--- Returns the _true_ capacity.
--- See NOTE [capacity]
+-- Returns the _true_ capacity, including the extra element
 capacity' :: MArray TArray a m => TRingBuffer a -> m Word
 capacity' buf = fromIntegral <$> Array.getNumElements buf.contents
 
@@ -103,7 +105,7 @@ capacity' buf = fromIntegral <$> Array.getNumElements buf.contents
 -- Non-blocking. A worst-case O(1) constant-time operation.
 --
 -- Calls to `tryPush` are synchronized with any other concurrent calls to
--- `pop`/`push`/`tryPop`/`tryPush`
+-- `pop`/`push`/`tryPop`/`tryPush` (using `STM.retry`)
 tryPush :: TRingBuffer a -> a -> STM Bool
 tryPush buf a = do
   !cap <- capacity' buf
@@ -124,7 +126,7 @@ tryPush buf a = do
 -- Non-blocking. A worst-case O(1) constant-time operation.
 --
 -- Calls to `tryPop` are synchronized with any other concurrent calls to
--- `pop`/`push`/`tryPop`/`tryPush`
+-- `pop`/`push`/`tryPop`/`tryPush` (using `STM.retry`)
 tryPop :: TRingBuffer a -> STM (Maybe a)
 tryPop buf = do
   !cap <- capacity' buf
@@ -149,7 +151,7 @@ tryPop buf = do
 -- (by another thread running `pop` or `tryPop`)
 --
 -- Calls to `push` are synchronized with any other concurrent calls to
--- `pop`/`push`/`tryPop`/`tryPush`
+-- `pop`/`push`/`tryPop`/`tryPush` (using `STM.retry`)
 push :: TRingBuffer a -> a -> STM ()
 push buf a = do
     writingSucceeded <- tryPush buf a
@@ -161,7 +163,7 @@ push buf a = do
 -- (by another thread running `push` or `tryPush`)
 --
 -- Calls to `pop` are synchronized with any other concurrent calls to
--- `pop`/`push`/`tryPop`/`tryPush`
+-- `pop`/`push`/`tryPop`/`tryPush` (using `STM.retry`)
 pop :: TRingBuffer a -> STM a
 pop buf = do 
     res <- tryPop buf
@@ -174,4 +176,4 @@ pop buf = do
 --
 -- This reduces a level of Pointer indirection vs storing `Maybe a` inside the array
 emptyElem :: a
-emptyElem = (error "attempted to read uninitialized element of TRingBuffer")
+emptyElem = (error "attempted to read an uninitialized element of a TRingBuffer. This should be impossible, and thus indicates a bug in TRingBuffer.")
