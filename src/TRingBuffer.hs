@@ -1,91 +1,173 @@
 {-# LANGUAGE GHC2021 #-}
-module TRingBuffer where
+{-# LANGUAGE OverloadedRecordDot #-}
+module TRingBuffer 
+( 
+    -- * Definition & Creation
+    TRingBuffer
+    , empty
+    , emptyIO
+    , capacity
+    -- * Blocking interface
+    , push
+    , pop
+    -- * Non-blocking interface
+    , tryPush
+    , tryPop
+)
+where
 
 import GHC.Conc qualified
 import Control.Concurrent.STM (STM)
 import Control.Concurrent.STM qualified as STM
 import Control.Concurrent.STM.TVar (TVar)
 import Control.Concurrent.STM.TVar qualified as TVar
--- TODO use primitive-unlifted instead maybe?
-import Data.Primitive.Array (Array)
+import Data.Primitive.Array (MutableArray)
 import Data.Primitive.Array qualified as Array
-import Data.IORef (IORef)
-import Data.IORef qualified as IORef
+import Control.Monad.Primitive (RealWorld)
 
+-- | A Bounded concurrent FIFO queue, built on top of STM (using TVars).
+--
+-- Goals of this datastructure:
+-- - Easy to use; no hidden footguns
+-- - Predictable memory usage
+-- - O(1) pushing and O(1) popping. These are real-time (i.e. worst-case) bounds, no amortization!
+-- - Simple implementation
+--
+-- In essence, this is a Haskell translation of the traditional
+-- 'ring buffer', AKA 'circular buffer' as described for example
+-- - https://en.wikipedia.org/wiki/Circular_buffer
+-- - https://rigtorp.se/ringbuffer/
 data TRingBuffer a = TRingBuffer
-    { readerIdx :: !(TVar Int)
-    , writerIdx :: !(TVar Int)
-    , contents :: !(IORef (Array (Maybe a)))
-    }
+  { reader :: !(TVar Int)
+  , writer :: !(TVar Int)
+  , contents :: !(MutableArray RealWorld a)
+  }
 
-new :: Word -> STM (TRingBuffer a)
-new capacity = do
-    readerIdx <- TVar.newTVar 0
-    writerIdx <- TVar.newTVar 0
-    contents <- GHC.Conc.unsafeIOToSTM $ IORef.newIORef (initializeContents capacity)
-    pure (TRingBuffer readerIdx writerIdx contents)
+instance Show (TRingBuffer a) where
+    show buf = "TRingBuffer {capacity = " <> show (capacity buf) <> ", ...}"
 
-newIO :: Word -> IO (TRingBuffer a)
-newIO capacity = do
-    readerIdx <- TVar.newTVarIO 0
-    writerIdx <- TVar.newTVarIO 0
-    contents <- IORef.newIORef (initializeContents capacity)
-    pure (TRingBuffer readerIdx writerIdx contents)
+-- | Create a new TRingBuffer
+empty :: Word -> STM (TRingBuffer a)
+empty cap = do
+  reader <- TVar.newTVar 0
+  writer <- TVar.newTVar 0
+  contents <- GHC.Conc.unsafeIOToSTM $ Array.newArray (fromIntegral (cap + 1)) emptyElem
+  pure TRingBuffer{reader, writer, contents}
 
-initializeContents :: Word -> Array (Maybe a)
-initializeContents capacity = Array.runArray (Array.newArray (fromIntegral (capacity + 1)) Nothing)
+-- | Create a new TRingBuffer, directly in IO (outside of STM)
+emptyIO :: Word -> IO (TRingBuffer a)
+emptyIO cap = do
+  reader <- TVar.newTVarIO 0
+  writer <- TVar.newTVarIO 0
+  contents <- Array.newArray (fromIntegral (cap + 1)) emptyElem
+  pure TRingBuffer{reader, writer, contents}
 
-tryPut :: TRingBuffer a -> a -> STM Bool
-tryPut (TRingBuffer r w c) a = do
-    w' <- TVar.readTVar w
-    r' <- TVar.readTVar r
-    c'<- stmReadIORef c
-    let capacity = Array.sizeofArray c'
-    if (w' + 1) `mod` capacity == r' then
-        -- Buffer is full
-        pure False
-    else do
-        GHC.Conc.unsafeIOToSTM $  do
-            -- marr <- Array.thawArray c' 0 capacity
-            -- I _think_ but am not 100% sure this unsafeThaw is allowed:
-            marr <- Array.unsafeThawArray c'
-            Array.writeArray marr w' (Just a)
-            c'' <- Array.unsafeFreezeArray marr
-            IORef.writeIORef c c''
-            
-        TVar.writeTVar w ((w' + 1) `mod` capacity)
-        pure True
+-- | Check the maximum number of elements that can be stored in this TRingBuffer
+--
+-- Non-blocking. A worst-case O(1) constant-time operation
+capacity :: TRingBuffer a -> Int
+capacity buf = Array.sizeofMutableArray buf.contents
 
-tryGet :: TRingBuffer a -> STM (Maybe a)
-tryGet (TRingBuffer r w c) = do
-    w' <- TVar.readTVar w
-    r' <- TVar.readTVar r
-    if r' == w' then
-        -- Buffer is empty
-        pure Nothing
-    else do
-        c' <- stmReadIORef c
-        let capacity = Array.sizeofArray c'
-        let a = Array.indexArray c' r'
-        TVar.writeTVar r ((r' + 1) `mod` capacity)
-        pure a
+-- | Attempts to add a new element to the TRingBuffer.
+--
+-- If writing succeeded, returns `True`.
+-- If the buffer is full, returns `False`.
+--
+-- Non-blocking. A worst-case O(1) constant-time operation.
+--
+-- Calls to `tryPush` are synchronized with any other concurrent calls to
+-- `pop`/`push`/`tryPop`/`tryPush`
+tryPush :: TRingBuffer a -> a -> STM Bool
+tryPush buf a = do
+  let !cap = capacity buf
+  readIdx <- TVar.readTVar buf.reader
+  writeIdx <- TVar.readTVar buf.writer
+  let newWriteIdx = (writeIdx + 1) `mod` cap
+  if newWriteIdx == readIdx then
+      -- Buffer is full
+      pure False
+  else do
+      unsafeWriteElem buf writeIdx a
+      TVar.writeTVar buf.writer newWriteIdx
+      pure True
 
-put :: TRingBuffer a -> a -> STM ()
-put buf a = do
-    res <- tryPut buf a
-    STM.check res
+-- | Attempts to grab the earliest-written element from the TRingBuffer.
+-- 
+-- Returns `Nothing` if the buffer is empty.
+-- Non-blocking. A worst-case O(1) constant-time operation.
+--
+-- Calls to `tryPop` are synchronized with any other concurrent calls to
+-- `pop`/`push`/`tryPop`/`tryPush`
+tryPop :: TRingBuffer a -> STM (Maybe a)
+tryPop buf = do
+  let !cap = capacity buf
+  readIdx <- TVar.readTVar buf.reader
+  writeIdx <- TVar.readTVar buf.writer
+  if readIdx == writeIdx then
+      -- Buffer is empty
+      pure Nothing
+  else do
+      a <- unsafeReadElem buf readIdx
+      -- Not strictly necessary, but not overwriting elements we take out
+      -- might delay them being GC'd
+      unsafeWriteElem buf readIdx emptyElem
+      let newReadIdx = (readIdx + 1) `mod` cap
+      TVar.writeTVar buf.reader newReadIdx
+      pure (Just a)
 
-get :: TRingBuffer a -> STM a
-get buf = do
-    res <- tryGet buf
+-- | Adds a new element to the TRingBuffer.
+--
+-- If the buffer is full, will block until there is space.
+-- (by another thread running `pop` or `tryPop`)
+--
+-- Calls to `push` are synchronized with any other concurrent calls to
+-- `pop`/`push`/`tryPop`/`tryPush`
+push :: TRingBuffer a -> a -> STM ()
+push buf a = do
+    writingSucceeded <- tryPush buf a
+    STM.check writingSucceeded
+
+-- | Reads the oldest element from the TRingBuffer.
+--
+-- If the buffer is empty, will block until an element was written.
+-- (by another thread running `push` or `tryPush`)
+--
+-- Calls to `pop` are synchronized with any other concurrent calls to
+-- `pop`/`push`/`tryPop`/`tryPush`
+pop :: TRingBuffer a -> STM a
+pop buf = do 
+    res <- tryPop buf
     case res of
         Nothing -> STM.retry
         Just a -> pure a
 
--- capacity :: TRingBuffer a -> Int
--- capacity (TRingBuffer _r _w c) = System.IO.Unsafe.unsafePerformIO $ do
---     c' <- IORef.readIORef c
---     pure $ Array.sizeofArray c'
+-- Used a single shared 'default' element
+-- that is used for empty spots in the array.
+--
+-- This reduces a level of Pointer indirection vs storing `Maybe a` inside the array
+emptyElem :: a
+emptyElem = (error "attempted to read uninitialized element of TRingBuffer")
 
-stmReadIORef :: IORef a -> STM a
-stmReadIORef = GHC.Conc.unsafeIOToSTM . IORef.readIORef
+-- Read an element of a mutable array in the STM monad.
+--
+-- Unsafe because no bounds checking is done,
+-- and the caller has to ensure that we're not reading an index another thread is writing to.
+--
+-- Calling this IO op in STM is sound because:
+-- - This operation is idempotent
+-- - This operation calls a single GHC primop, so we cannot observe a broken state on STM transaction restart
+unsafeReadElem :: TRingBuffer a -> Int -> STM a
+unsafeReadElem buf idx =
+    GHC.Conc.unsafeIOToSTM $ Array.readArray buf.contents idx
+
+-- Write an element of a mutable array in the STM monad.
+--
+-- Unsafe because no bounds checking is done,
+-- and the caller has to ensure that we're not writing to an index another thread is reading.
+--
+-- Calling this IO op in STM is sound because:
+-- - This operation is idempotent
+-- - This operation calls a single GHC primop, so we cannot observe a broken state on STM transaction restart
+unsafeWriteElem :: TRingBuffer a -> Int -> a -> STM ()
+unsafeWriteElem buf idx a =
+    GHC.Conc.unsafeIOToSTM $ Array.writeArray buf.contents idx a
