@@ -58,7 +58,7 @@ library
     import:           warnings
 
     -- Modules exported by the library.
-    exposed-modules:  MyLib
+    exposed-modules:  TRingBuffer
 
     -- Modules included in this library but not exported.
     -- other-modules:
@@ -67,20 +67,20 @@ library
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base ^>=4.19.0.0
+    build-depends:    base ^>=4.19.0.0, primitive, stm
 
     -- Directories containing source files.
     hs-source-dirs:   src
 
     -- Base language which the package is written in.
-    default-language: Haskell2010
+    default-language: GHC2021
 
 test-suite tring-buffer-test
     -- Import common warning flags.
     import:           warnings
 
     -- Base language which the package is written in.
-    default-language: Haskell2010
+    default-language: GHC2021
 
     -- Modules included in this executable, other than Main.
     -- other-modules:
