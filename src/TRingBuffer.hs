@@ -23,16 +23,10 @@ import Control.Concurrent.STM (STM)
 import Control.Concurrent.STM qualified as STM
 import Control.Concurrent.STM.TVar (TVar)
 import Control.Concurrent.STM.TVar qualified as TVar
--- import Data.Primitive.Array (MutableArray)
--- import Data.Primitive.Array qualified as Array
--- import Control.Monad.Primitive (RealWorld)
 import Control.Concurrent.STM.TArray (TArray)
--- import Control.Concurrent.STM.TArray qualified as TArray
 import Data.Array.Base (MArray)
 import Data.Ix (Ix)
 import Data.Array.Base qualified as Array
--- import Data.Array.MArray (MArray)
--- import Data.Array.MArray qualified as MArray
 import System.IO.Unsafe qualified
 
 
@@ -41,10 +35,10 @@ import System.IO.Unsafe qualified
 -- Goals of this datastructure:
 -- - Easy to use; no hidden footguns
 -- - Predictable memory usage
--- - O(1) pushing and O(1) popping. These are real-time (i.e. worst-case) bounds, no amortization!
+-- - O(1) pushing and O(1) popping. These are real-time (worst-case) bounds, no amortization!
 -- - Simple implementation
 --
--- In essence, this is a Haskell translation of the traditional
+-- In essence, this is a straightforward Haskell translation of the traditional
 -- 'ring buffer', AKA 'circular buffer' as described for example
 -- - https://en.wikipedia.org/wiki/Circular_buffer
 -- - https://rigtorp.se/ringbuffer/
@@ -87,6 +81,7 @@ emptyContents cap =
 -- Non-blocking. A worst-case O(1) constant-time operation,
 -- uses no STM.
 capacity :: TRingBuffer a -> Word
+{-# INLINABLE capacity #-}
 capacity buf = 
     -- SAFETY: Once the array is allocated,
     -- we never grow or shrink it,
@@ -98,6 +93,7 @@ capacity buf =
 
 -- Returns the _true_ capacity, including the extra element
 capacity' :: MArray TArray a m => TRingBuffer a -> m Word
+{-# INLINABLE capacity' #-}
 capacity' buf = fromIntegral <$> Array.getNumElements buf.contents
 
 -- | Attempts to add a new element to the TRingBuffer.
@@ -110,6 +106,7 @@ capacity' buf = fromIntegral <$> Array.getNumElements buf.contents
 -- Calls to `tryPush` are synchronized with any other concurrent calls to
 -- `pop`/`push`/`tryPop`/`tryPush` (using `STM.retry`)
 tryPush :: TRingBuffer a -> a -> STM Bool
+{-# INLINABLE tryPush #-}
 tryPush buf a = do
   !cap <- capacity' buf
   readIdx <- TVar.readTVar buf.reader
@@ -131,6 +128,7 @@ tryPush buf a = do
 -- Calls to `tryPop` are synchronized with any other concurrent calls to
 -- `pop`/`push`/`tryPop`/`tryPush` (using `STM.retry`)
 tryPop :: TRingBuffer a -> STM (Maybe a)
+{-# INLINABLE tryPop #-}
 tryPop buf = do
   !cap <- capacity' buf
   readIdx <- TVar.readTVar buf.reader
@@ -156,6 +154,7 @@ tryPop buf = do
 -- Calls to `push` are synchronized with any other concurrent calls to
 -- `pop`/`push`/`tryPop`/`tryPush` (using `STM.retry`)
 push :: TRingBuffer a -> a -> STM ()
+{-# INLINABLE push #-}
 push buf a = do
     writingSucceeded <- tryPush buf a
     STM.check writingSucceeded
@@ -168,15 +167,16 @@ push buf a = do
 -- Calls to `pop` are synchronized with any other concurrent calls to
 -- `pop`/`push`/`tryPop`/`tryPush` (using `STM.retry`)
 pop :: TRingBuffer a -> STM a
+{-# INLINABLE pop #-}
 pop buf = do 
     res <- tryPop buf
     case res of
         Nothing -> STM.retry
         Just a -> pure a
 
--- Used a single shared 'default' element
+-- The single shared bottom value
 -- that is used for empty spots in the array.
 --
--- This reduces a level of Pointer indirection vs storing `Maybe a` inside the array
+-- This reduces a level of pointer indirection vs storing `Maybe a` inside the array
 emptyElem :: a
 emptyElem = (error "attempted to read an uninitialized element of a TRingBuffer. This should be impossible, and thus indicates a bug in TRingBuffer.")
