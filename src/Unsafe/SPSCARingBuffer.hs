@@ -33,11 +33,11 @@ import Control.Concurrent.MVar qualified as MVar
 -- If you want to potentially have multiple concurrent readers or writers,
 -- consider MPMCRingBuffer instead, which uses an extra 'reader-lock' and 'writer-lock'.
 data SPSCARingBuffer a = SPSCARingBuffer
-  { reader :: {-# UNPACK #-} !Counter
-  , writer :: {-# UNPACK #-} !Counter
-  , contents :: {-# UNPACK #-} !(MutableArray RealWorld a)
-  , emptySigSem :: {-# UNPACK #-} !BinSem
-  , fullSigSem :: {-# UNPACK #-} !BinSem
+  { reader :: {-# UNPACK #-} !Counter -- ^ The next index to read from
+  , writer :: {-# UNPACK #-} !Counter -- ^ The next index to write to
+  , contents :: {-# UNPACK #-} !(MutableArray RealWorld a) -- ^ The buffer itself
+  , emptySigSem :: {-# UNPACK #-} !BinSem -- ^ Wait when empty, be notified when a push comes in
+  , fullSigSem :: {-# UNPACK #-} !BinSem -- ^ Wait when full, be notified when a pop comes in
   }
 
 empty :: Word -> IO (SPSCARingBuffer a)
