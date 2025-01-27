@@ -28,6 +28,7 @@ import Data.Array.Base (MArray)
 import Data.Ix (Ix)
 import Data.Array.Base qualified as Array
 import System.IO.Unsafe qualified
+import GHC.Conc qualified
 
 
 -- | A Bounded Concurrent STM-based FIFO Queue, implemented as a Ring Buffer
@@ -109,7 +110,9 @@ tryPush :: TRingBuffer a -> a -> STM Bool
 {-# INLINABLE tryPush #-}
 tryPush buf a = do
   !cap <- capacity' buf
-  readIdx <- TVar.readTVar buf.reader
+  -- Pushing should not conflict with popping
+  -- See [NOTE push consistency]
+  readIdx <- readTVarWithoutBlocking buf.reader
   writeIdx <- TVar.readTVar buf.writer
   let newWriteIdx = (writeIdx + 1) `mod` cap
   if newWriteIdx == readIdx then
@@ -132,7 +135,9 @@ tryPop :: TRingBuffer a -> STM (Maybe a)
 tryPop buf = do
   !cap <- capacity' buf
   readIdx <- TVar.readTVar buf.reader
-  writeIdx <- TVar.readTVar buf.writer
+  -- Popping should not conflict with pushing
+  -- See [NOTE pop consistency]
+  writeIdx <- readTVarWithoutBlocking buf.writer
   if readIdx == writeIdx then
       -- Buffer is empty
       pure Nothing
@@ -157,7 +162,14 @@ push :: TRingBuffer a -> a -> STM ()
 {-# INLINABLE push #-}
 push buf a = do
     writingSucceeded <- tryPush buf a
-    STM.check writingSucceeded
+    if writingSucceeded then
+        pure ()
+    else do
+        -- [NOTE push consistency] On failure, ensure we add `buf.reader` to the STM access set
+        -- so when it changes, the transaction is retried.
+        -- Not doing this will result in 'STM blocked indefinitely' errors.
+        _ <- TVar.readTVar buf.reader
+        STM.retry
 
 -- | Reads the oldest element from the TRingBuffer.
 --
@@ -171,8 +183,28 @@ pop :: TRingBuffer a -> STM a
 pop buf = do 
     res <- tryPop buf
     case res of
-        Nothing -> STM.retry
         Just a -> pure a
+        Nothing -> do
+            -- [NOTE pop consistency] On failure, ensure we add `buf.writer` to the STM access set
+            -- so when it changes, the transaction is retried.
+            -- Not doing this will result in 'STM blocked indefinitely' errors.
+            _ <- TVar.readTVar buf.writer
+            STM.retry
+
+-- Sneakily reads a TVar without adding it to the STM access set.
+--
+-- This means that if another transaction changes that TVar,
+-- this transaction does not retry.
+-- 
+-- However, if we _do_ want to retry for another reason,
+-- it is important to add a manual `readTVar`
+-- before retrying. 
+-- Failing to do so might result in
+-- 'STM blocked indefinitely' errors,
+-- since otherwise STM has no idea that our code 
+-- might produce a different result on retry.
+readTVarWithoutBlocking :: TVar a -> STM a
+readTVarWithoutBlocking = GHC.Conc.unsafeIOToSTM . GHC.Conc.readTVarIO
 
 -- The single shared bottom value
 -- that is used for empty spots in the array.

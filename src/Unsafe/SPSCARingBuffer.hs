@@ -1,5 +1,6 @@
 {-# LANGUAGE GHC2021 #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# OPTIONS_GHC -ddump-stg-final -ddump-cmm -ddump-asm -ddump-to-file #-}
 module Unsafe.SPSCARingBuffer (
   -- * Definition & creation
   SPSCARingBuffer,
@@ -16,8 +17,8 @@ module Unsafe.SPSCARingBuffer (
 import Control.Monad.Primitive (RealWorld)
 import Data.Primitive.Array (MutableArray)
 import Data.Primitive.Array qualified as Array
-import Control.Concurrent.Counter (Counter)
-import Control.Concurrent.Counter qualified as Counter
+import Data.IORef (IORef)
+import Data.IORef qualified as IORef
 import Control.Concurrent.MVar (MVar)
 import Control.Concurrent.MVar qualified as MVar
 
@@ -33,18 +34,26 @@ import Control.Concurrent.MVar qualified as MVar
 -- If you want to potentially have multiple concurrent readers or writers,
 -- consider MPMCRingBuffer instead, which uses an extra 'reader-lock' and 'writer-lock'.
 data SPSCARingBuffer a = SPSCARingBuffer
-  { reader :: {-# UNPACK #-} !Counter -- ^ The next index to read from
-  , writer :: {-# UNPACK #-} !Counter -- ^ The next index to write to
+  { reader :: {-# UNPACK #-} !(IORef Word) -- ^ The next index to read from
+  , writer :: {-# UNPACK #-} !(IORef Word) -- ^ The next index to write to
   , contents :: {-# UNPACK #-} !(MutableArray RealWorld a) -- ^ The buffer itself
   , emptySigSem :: {-# UNPACK #-} !BinSem -- ^ Wait when empty, be notified when a push comes in
   , fullSigSem :: {-# UNPACK #-} !BinSem -- ^ Wait when full, be notified when a pop comes in
   }
 
+-- NOTE [IORef and atomics]
+--
+-- This module relies on `IORef.readIORef` having a `Acquire` memory ordering,
+-- and `IORef.writeIORef` having `Release` memory ordering.
+--
+-- This is the case in GHC since 9.8 as well as having been backported to >= 9.6.1 and >= 9.4.4
+-- Details: https://gitlab.haskell.org/ghc/ghc/-/merge_requests/9373
+
 empty :: Word -> IO (SPSCARingBuffer a)
 {-# INLINE empty #-}
 empty cap = do
-  reader <- Counter.new 0
-  writer <- Counter.new 0
+  reader <- IORef.newIORef 0
+  writer <- IORef.newIORef 0
   contents <- emptyContents
   emptySigSem <- newBinSem
   fullSigSem <- newBinSem
@@ -56,9 +65,9 @@ capacity :: SPSCARingBuffer a -> Word
 {-# INLINE capacity #-}
 capacity buf = (fromIntegral $ capacity' buf) - 1
 
-capacity' :: SPSCARingBuffer a -> Int
+capacity' :: SPSCARingBuffer a -> Word
 {-# INLINE capacity' #-}
-capacity' buf = Array.sizeofMutableArray buf.contents
+capacity' buf = fromIntegral $ Array.sizeofMutableArray buf.contents
 
 -- | Attempts to add a new element to the buffer.
 --
@@ -70,14 +79,14 @@ tryPush :: SPSCARingBuffer a -> a -> IO Bool
 {-# INLINE tryPush #-}
 tryPush buf a = do
   let !cap = capacity' buf
-  writeIdx <- Counter.get buf.writer
+  writeIdx <- IORef.readIORef buf.writer
   let !newWriteIdx = circularInc writeIdx cap
-  readIdx <- Counter.get buf.reader
+  readIdx <- IORef.readIORef buf.reader
   if newWriteIdx == readIdx then
     pure False
   else do
-    Array.writeArray buf.contents writeIdx a
-    Counter.set buf.writer newWriteIdx
+    Array.writeArray buf.contents (fromIntegral writeIdx) a
+    IORef.writeIORef buf.writer newWriteIdx
     notifyBinSem buf.emptySigSem
     pure True
 
@@ -89,15 +98,15 @@ tryPop :: SPSCARingBuffer a -> IO (Maybe a)
 {-# INLINE tryPop #-}
 tryPop buf = do
   let !cap = capacity' buf
-  readIdx <- Counter.get buf.reader
-  writeIdx <- Counter.get buf.writer
+  readIdx <- IORef.readIORef buf.reader
+  writeIdx <- IORef.readIORef buf.writer
   if readIdx == writeIdx then
     pure Nothing
   else do
-    a <- Array.readArray buf.contents readIdx
+    a <- Array.readArray buf.contents (fromIntegral readIdx)
     -- Array.writeArray buf.contents readIdx emptyElem -- TODO: Doublecheck
     let newReadIdx = circularInc readIdx cap
-    Counter.set buf.reader newReadIdx
+    IORef.writeIORef buf.reader newReadIdx
     notifyBinSem buf.fullSigSem 
     pure (Just a)
 
