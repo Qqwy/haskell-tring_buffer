@@ -44,16 +44,10 @@ import Control.Concurrent.STM (STM)
 import Control.Concurrent.STM qualified as STM
 import Control.Concurrent.STM.TVar (TVar)
 import Control.Concurrent.STM.TVar qualified as TVar
--- import Data.Primitive.Array (MutableArray)
--- import Data.Primitive.Array qualified as Array
--- import Control.Monad.Primitive (RealWorld)
 import Control.Concurrent.STM.TArray (TArray)
--- import Control.Concurrent.STM.TArray qualified as TArray
 import Data.Array.Base (MArray)
 import Data.Ix (Ix)
 import Data.Array.Base qualified as Array
--- import Data.Array.MArray (MArray)
--- import Data.Array.MArray qualified as MArray
 import System.IO.Unsafe qualified
 
 
