@@ -170,7 +170,7 @@ capacity' buf = fromIntegral <$> Array.getNumElements buf.contents
 -- Non-blocking. A worst-case O(1) constant-time operation.
 --
 -- Calls to `tryPush` are synchronized with any other concurrent calls to
--- `push`/`tryPush` (using `STM.retry`)
+-- `push`/`tryPush`
 --
 -- Most of the time, pushing can happen concurrently with popping.
 -- Assuming pushes and pops happen at the same rate (on average),
@@ -231,7 +231,7 @@ tryPush buf a = do
 -- Non-blocking. A worst-case O(1) constant-time operation.
 --
 -- Calls to `tryPop` are synchronized with any other concurrent calls to
--- `pop`/`tryPop`/`peek` (using `STM.retry`)
+-- `pop`/`tryPop`/`peek`
 --
 -- Most of the time, popping can happen concurrently with pushing.
 -- Assuming pushes and pops happen at the same rate (on average),
@@ -345,11 +345,11 @@ peekAll buf = do
 
 -- | Adds a new element to the TRingBuffer.
 --
--- If the buffer is full, will block until there is space.
+-- If the buffer is full, will block until there is space (using `STM.retry`).
 -- (by another thread running `pop` or `tryPop`)
 --
 -- Calls to `push` are synchronized with any other concurrent calls to
--- `push`/`tryPush` (using `STM.retry`)
+-- `push`/`tryPush`
 --
 -- Most of the time, pushing can happen concurrently with popping.
 -- Assuming pushes and pops happen at the same rate (on average),
@@ -364,11 +364,11 @@ push buf a = do
 
 -- | Reads the oldest element from the TRingBuffer.
 --
--- If the buffer is empty, will block until an element was written.
+-- If the buffer is empty, will block until an element was written (using `STM.retry`).
 -- (by another thread running `push` or `tryPush`)
 --
 -- Calls to `pop` are synchronized with any other concurrent calls to
--- `pop`/`tryPop` (using `STM.retry`)
+-- `pop`/`tryPop`
 --
 -- Most of the time, popping can happen concurrently with pushing.
 -- Assuming pushes and pops happen at the same rate (on average),
