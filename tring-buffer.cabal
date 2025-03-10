@@ -76,6 +76,7 @@ executable example
 
     -- Base language which the package is written in.
     default-language: GHC2021
+    ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
 
 library
     -- Import common warning flags.

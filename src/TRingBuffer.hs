@@ -47,13 +47,10 @@ import Control.Concurrent.STM qualified as STM
 import Control.Concurrent.STM.TVar (TVar)
 import Control.Concurrent.STM.TVar qualified as TVar
 import Control.Concurrent.STM.TArray (TArray)
-import Control.Concurrent (yield)
 import Data.Array.Base (MArray)
 import Data.Ix (Ix)
 import Data.Array.Base qualified as Array
 import System.IO.Unsafe qualified
-import GHC.Conc (unsafeIOToSTM)
-
 
 -- | A Bounded Concurrent STM-based FIFO Queue, implemented as a Ring Buffer
 --
@@ -254,6 +251,11 @@ pop buf = do
         Nothing -> STM.retry
         Just a -> pure a
 
+-- | Similar to `push`, but instead of, when full, block-and-waiting for a `pop` to make space,
+-- the oldest value is immediately overwritten instead.
+--
+-- This function always synchronizes with other pushing operations.
+-- It will synchronize with popping operations iff the buffer is currently full.
 overwritingPush :: TRingBuffer a -> a -> STM ()
 overwritingPush buf a = do
   !cap <- capacity' buf
@@ -270,7 +272,6 @@ overwritingPush buf a = do
       let newReadIdx = modularInc readIdxFresh cap
       actuallyPush writeIdx newWriteIdx newReadIdx
       TVar.writeTVar buf.readerAndCachedWriter (Indexes newReadIdx newWriteIdx)
-      unsafeIOToSTM yield
     else
       -- Buffer not full after all.
       -- Save value, update write idx 
