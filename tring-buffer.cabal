@@ -69,7 +69,7 @@ executable example
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base ^>=4.19.0.0, array, stm, async, tring-buffer
+    build-depends:    base, array, stm, async, tring-buffer
 
     -- Directories containing source files.
     hs-source-dirs:   app
@@ -91,7 +91,7 @@ library
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base ^>=4.19.0.0, array, stm, async
+    build-depends:    base, array, stm, async
 
     -- Directories containing source files.
     hs-source-dirs:   src
@@ -123,5 +123,5 @@ test-suite tring-buffer-test
 
     -- Test dependencies.
     build-depends:
-        base ^>=4.19.0.0,
+        base,
         tring-buffer
