@@ -31,12 +31,14 @@ module TRingBuffer
     , empty
     , emptyIO
     , capacity
-    -- * Blocking interface
+    -- * Blocking (re-trying) interface
     , push
     , pop
-    -- * Non-blocking interface
+    -- * Non-blocking (retry-less) interface
     , tryPush
     , tryPop
+    -- * Overwrite oldest element
+    , overwritingPush
 )
 where
 
@@ -56,7 +58,9 @@ import System.IO.Unsafe qualified
 -- Goals of this datastructure:
 -- - Easy to use; no hidden footguns
 -- - Predictable memory usage
--- - O(1) pushing and O(1) popping. These are real-time (i.e. worst-case) bounds, no amortization!
+-- - Assuming a single reader and writer, O(1) pushing and O(1) popping.
+-- - Readers do not usually conflict with writers (only once every `capacity / 2` operations)
+-- - Writers do not usually conflict with readers (only once every `capacity / 2` operations)
 -- - Simple implementation
 --
 -- In essence, this is a Haskell translation of the traditional
@@ -78,6 +82,7 @@ instance Show (TRingBuffer a) where
 
 -- | Create a new TRingBuffer with the given max `capacity`
 empty :: Word -> STM (TRingBuffer a)
+{-# INLINABLE empty #-}
 empty cap = do
   let readIdx = 0
   let writeIdx = 0
@@ -88,6 +93,7 @@ empty cap = do
 
 -- | Create a new TRingBuffer, directly in IO (outside of STM)
 emptyIO :: Word -> IO (TRingBuffer a)
+{-# INLINABLE emptyIO #-}
 emptyIO cap = do
   let readIdx = 0
   let writeIdx = 0
@@ -110,6 +116,7 @@ emptyContents cap =
 -- Non-blocking. A worst-case O(1) constant-time operation,
 -- uses no STM.
 capacity :: TRingBuffer a -> Word
+{-# INLINABLE capacity #-}
 capacity buf = 
     -- SAFETY: Once the array is allocated,
     -- we never grow or shrink it,
@@ -120,6 +127,7 @@ capacity buf =
 
 -- Returns the _true_ capacity, including the extra element
 capacity' :: MArray TArray a m => TRingBuffer a -> m Word
+{-# INLINABLE capacity' #-}
 capacity' buf = fromIntegral <$> Array.getNumElements buf.contents
 
 -- | Attempts to add a new element to the TRingBuffer.
@@ -136,10 +144,11 @@ capacity' buf = fromIntegral <$> Array.getNumElements buf.contents
 -- Assuming pushes and pops happen at the same rate (on average),
 -- only one every `capacity / 2` pushes will synchronize with a pop.
 tryPush :: TRingBuffer a -> a -> STM Bool
+{-# INLINABLE tryPush #-}
 tryPush buf a = do
   !cap <- capacity' buf
   Indexes writeIdx readIdxCached <- TVar.readTVar buf.writerAndCachedReader
-  let newWriteIdx = (writeIdx + 1) `mod` cap
+  let newWriteIdx = modularInc writeIdx cap
   if newWriteIdx == readIdxCached then do
     -- Buffer may be full, double-check with real read index
     Indexes readIdxFresh _ <- TVar.readTVar buf.readerAndCachedWriter
@@ -174,6 +183,7 @@ tryPush buf a = do
 -- Assuming pushes and pops happen at the same rate (on average),
 -- only one every `capacity / 2` pops will synchronize with a push.
 tryPop :: TRingBuffer a -> STM (Maybe a)
+{-# INLINABLE tryPop #-}
 tryPop buf = do
   Indexes readIdx writeIdxCached <- TVar.readTVar buf.readerAndCachedWriter
   if readIdx == writeIdxCached then do
@@ -200,7 +210,7 @@ tryPop buf = do
       -- until overwritten by a later write, potentially delaying it being GC'd
       Array.writeArray buf.contents readIdx emptyElem
       !cap <- capacity' buf
-      let newReadIdx = (readIdx + 1) `mod` cap
+      let newReadIdx = modularInc readIdx cap
       TVar.writeTVar buf.readerAndCachedWriter (Indexes newReadIdx writeIdx)
       pure (Just a)
 
@@ -216,6 +226,7 @@ tryPop buf = do
 -- Assuming pushes and pops happen at the same rate (on average),
 -- only one every `capacity / 2` pushes will synchronize with a pop.
 push :: TRingBuffer a -> a -> STM ()
+{-# INLINABLE push #-}
 push buf a = do
     res <- tryPush buf a
     case res of
@@ -234,11 +245,43 @@ push buf a = do
 -- Assuming pushes and pops happen at the same rate (on average),
 -- only one every `capacity / 2` pops will synchronize with a push.
 pop :: TRingBuffer a -> STM a
+{-# INLINABLE pop #-}
 pop buf = do 
     res <- tryPop buf
     case res of
         Nothing -> STM.retry
         Just a -> pure a
+
+overwritingPush :: TRingBuffer a -> a -> STM ()
+overwritingPush buf a = do
+  !cap <- capacity' buf
+  Indexes writeIdx readIdxCached <- TVar.readTVar buf.writerAndCachedReader
+  let newWriteIdx = modularInc writeIdx cap
+  if newWriteIdx == readIdxCached then do
+    -- Buffer may be full, double-check with real read index
+    Indexes readIdxFresh _ <- TVar.readTVar buf.readerAndCachedWriter
+    if newWriteIdx == readIdxFresh then do
+      -- Buffer truly full.
+      -- In this case we block with both readers and writers,
+      -- overwrite the oldest value
+      -- and bump both indexes by one slot
+      let newReadIdx = modularInc readIdxFresh cap
+      actuallyPush writeIdx newWriteIdx newReadIdx
+      TVar.writeTVar buf.readerAndCachedWriter (Indexes newReadIdx newWriteIdx)
+    else
+      -- Buffer not full after all.
+      -- Save value, update write idx 
+      -- and also update cached read idx
+      actuallyPush writeIdx newWriteIdx readIdxFresh
+  else
+    -- There is space, so we can do a normal push
+    -- and don't need to block any readers
+    actuallyPush writeIdx newWriteIdx readIdxCached
+  where
+    actuallyPush writeIdx newWriteIdx readIdx = do
+      Array.writeArray buf.contents writeIdx a
+      TVar.writeTVar buf.writerAndCachedReader (Indexes newWriteIdx readIdx)
+
 
 -- Used a single shared 'default' element
 -- that is used for empty spots in the array.
@@ -246,3 +289,9 @@ pop buf = do
 -- This reduces a level of Pointer indirection vs storing `Maybe a` inside the array
 emptyElem :: a
 emptyElem = (error "attempted to read an uninitialized element of a TRingBuffer. This should be impossible, and thus indicates a bug in TRingBuffer.")
+
+-- Incrementing with an equality check
+-- results in more efficient assembly
+-- than using (x + 1 `mod` cap)
+modularInc :: Word -> Word -> Word
+modularInc x cap = if succ x == cap then 0 else succ x
