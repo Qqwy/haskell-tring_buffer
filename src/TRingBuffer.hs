@@ -1,6 +1,27 @@
 -- | TRingBuffer: A Bounded Concurrent STM-based FIFO queue
 --
 -- This module is intended to be imported qualified.
+--
+-- ## Concurrency guarantees
+--
+-- TRingBuffer is built on top of STM, which does optimistic concurrency:
+-- Concurrent threads execute at the same time, and when a conflict between two concurrent threads is detected, 
+-- only one is allowed to continue, with the other one automatically retrying.
+--
+-- Ring buffers have one 'read index' and one 'write index'.
+-- - During a 'push', only the 'write index' is updated, but we check against the 'read index' to ensure we don't try to push to a full buffer.
+-- - During a 'pop', only the 'read index' is updated, but we check against the 'write index' to ensure we don't try to read from an empty buffer.
+--
+-- To reduce the amount of STM read-write conflicts, we cache the last-seen 'read index' in the TVar that contains the most up-to-date 'write index',
+-- and cache the last-seen 'write index' in the TVar that contains the most up-to-date 'read index'.
+--
+-- This way, we can skip checking the other TVar if we're sure there is enough space (when writing) or enough elements (when reading).
+-- That, in turn, allows us to most of the time allow reads to continue concurrently with writes (and vice-versa, vacuously).
+--
+-- Only when we're scared that there _may_ be a conflict, do we check against the other TVar, and then immediately update our cached value with the result.
+--
+-- Assuming pushes and pops happen at the same rate on average, this means that only one every `capacity / 2` operations
+-- will have to check both TVars at the same time (and conflict with any possible concurrent reads _and_ writes).
 {-# LANGUAGE GHC2021 #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 module TRingBuffer 
@@ -116,6 +137,10 @@ capacity' buf = fromIntegral <$> Array.getNumElements buf.contents
 --
 -- Calls to `tryPush` are synchronized with any other concurrent calls to
 -- `push`/`tryPush` (using `STM.retry`)
+--
+-- Most of the time, pushing can happen concurrently with popping.
+-- Assuming pushes and pops happen at the same rate (on average),
+-- only one every `capacity / 2` pushes will synchronize with a pop.
 tryPush :: TRingBuffer a -> a -> STM Bool
 tryPush buf a = do
   !cap <- capacity' buf
@@ -150,6 +175,10 @@ tryPush buf a = do
 --
 -- Calls to `tryPop` are synchronized with any other concurrent calls to
 -- `pop`/`tryPop` (using `STM.retry`)
+--
+-- Most of the time, popping can happen concurrently with pushing.
+-- Assuming pushes and pops happen at the same rate (on average),
+-- only one every `capacity / 2` pops will synchronize with a push.
 tryPop :: TRingBuffer a -> STM (Maybe a)
 tryPop buf = do
   Indexes readIdx writeIdxCached <- TVar.readTVar buf.readerAndCachedWriter
@@ -187,7 +216,11 @@ tryPop buf = do
 -- (by another thread running `pop` or `tryPop`)
 --
 -- Calls to `push` are synchronized with any other concurrent calls to
--- `pop`/`push`/`tryPop`/`tryPush` (using `STM.retry`)
+-- `push`/`tryPush` (using `STM.retry`)
+--
+-- Most of the time, pushing can happen concurrently with popping.
+-- Assuming pushes and pops happen at the same rate (on average),
+-- only one every `capacity / 2` pushes will synchronize with a pop.
 push :: TRingBuffer a -> a -> STM ()
 push buf a = do
     res <- tryPush buf a
@@ -201,7 +234,11 @@ push buf a = do
 -- (by another thread running `push` or `tryPush`)
 --
 -- Calls to `pop` are synchronized with any other concurrent calls to
--- `pop`/`push`/`tryPop`/`tryPush` (using `STM.retry`)
+-- `pop`/`tryPop` (using `STM.retry`)
+--
+-- Most of the time, popping can happen concurrently with pushing.
+-- Assuming pushes and pops happen at the same rate (on average),
+-- only one every `capacity / 2` pops will synchronize with a push.
 pop :: TRingBuffer a -> STM a
 pop buf = do 
     res <- tryPop buf
