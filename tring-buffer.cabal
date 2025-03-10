@@ -91,7 +91,11 @@ library
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base, array, stm, async
+    build-depends:
+      base >=4.7 && <5, 
+      array, 
+      stm, 
+      async
 
     -- Directories containing source files.
     hs-source-dirs:   src
@@ -99,12 +103,13 @@ library
     -- Base language which the package is written in.
     default-language: GHC2021
 
-test-suite tring-buffer-test
+test-suite test
     -- Import common warning flags.
     import:           warnings
 
     -- Base language which the package is written in.
     default-language: GHC2021
+    ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
 
     -- Modules included in this executable, other than Main.
     -- other-modules:
@@ -116,12 +121,45 @@ test-suite tring-buffer-test
     type:             exitcode-stdio-1.0
 
     -- Directories containing source files.
-    hs-source-dirs:   test
-
+    hs-source-dirs:   test/suite
+    build-tool-depends:
+        tasty-discover:tasty-discover
     -- The entrypoint to the test suite.
-    main-is:          Main.hs
+    main-is:          Suite.hs
 
     -- Test dependencies.
     build-depends:
-        base,
-        tring-buffer
+        -- Library and datatypes to exercise during tests:
+        base >=4.7 && <5,
+        stm,
+        lifted-async,
+        unliftio,
+        tring-buffer,
+        -- Test framework:
+        tasty,
+        tasty-golden,
+        tasty-hedgehog,
+        tasty-hunit,
+        hedgehog,
+    other-modules:
+        TRingBufferTest
+
+test-suite doctest
+  type: exitcode-stdio-1.0
+  main-is: Doctest.hs
+  hs-source-dirs:
+      test/doctest
+  default-extensions:
+      BangPatterns
+      OverloadedStrings
+      DeriveAnyClass
+      TypeApplications
+      NamedFieldPuns
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.7 && <5,
+      stm,
+      async,
+      tring-buffer,
+      doctest-parallel,
+  default-language: GHC2021
