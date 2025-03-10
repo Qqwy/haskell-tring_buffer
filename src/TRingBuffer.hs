@@ -87,6 +87,16 @@ data Indexes = Indexes
 -- | This instance is useful for debugging and introspection
 -- but do not use it inside STM
 -- as it uses STM + `peekAll` under the hood.
+--
+--
+-- >>> buf <- STM.atomically $ TRingBuffer.empty 10 :: IO (TRingBuffer Int)
+-- >>> mapM_ (\x -> STM.atomically (tryPush buf x)) [0..10]
+-- >>> buf
+-- TRingBuffer {capacity = 10, contents = [0,1,2,3,4,5,6,7,8,9] }
+-- >>> STM.atomically (TRingBuffer.peekAll buf)
+-- [0,1,2,3,4,5,6,7,8,9]
+-- >>> buf
+-- TRingBuffer {capacity = 10, contents = [0,1,2,3,4,5,6,7,8,9] }
 instance Show a => Show (TRingBuffer a) where
     show buf = "TRingBuffer {capacity = " <> show (capacity buf) <> ", contents = " <> elems <> " }"
       where
@@ -226,6 +236,29 @@ tryPush buf a = do
 -- Most of the time, popping can happen concurrently with pushing.
 -- Assuming pushes and pops happen at the same rate (on average),
 -- one every `capacity / 2` pops will synchronize with a push.
+--
+-- 
+-- >>> buf <- STM.atomically $ TRingBuffer.empty 3 :: IO (TRingBuffer Int)
+-- >>> mapM_ (\x -> STM.atomically (tryPush buf x)) [1,2,3]
+-- >>> buf
+-- TRingBuffer {capacity = 3, contents = [1,2,3] }
+--
+-- >>> STM.atomically (tryPop buf)
+-- Just 1
+-- >>> buf
+-- TRingBuffer {capacity = 3, contents = [2,3] }
+-- >>> STM.atomically (tryPop buf)
+-- Just 2
+-- >>> buf
+-- TRingBuffer {capacity = 3, contents = [3] }
+-- >>> STM.atomically (tryPop buf)
+-- Just 3
+-- >>> buf
+-- TRingBuffer {capacity = 3, contents = [] }
+-- >>> STM.atomically (tryPop buf)
+-- Nothing
+-- >>> buf
+-- TRingBuffer {capacity = 3, contents = [] }
 tryPop :: TRingBuffer a -> STM (Maybe a)
 {-# INLINABLE tryPop #-}
 tryPop buf = do
@@ -358,6 +391,17 @@ pop buf = do
 --
 -- This function always synchronizes with other pushing operations.
 -- It will synchronize with popping operations iff the buffer is currently full.
+--
+-- >>> buf <- STM.atomically $ TRingBuffer.empty 3 :: IO (TRingBuffer Int)
+-- >>> mapM_ (\x -> STM.atomically (tryPush buf x)) [1,2,3]
+-- >>> buf
+-- TRingBuffer {capacity = 3, contents = [1,2,3] }
+-- >>> STM.atomically $ TRingBuffer.overwritingPush buf 4
+-- >>> buf
+-- TRingBuffer {capacity = 3, contents = [2,3,4] }
+-- >>> STM.atomically $ TRingBuffer.overwritingPush buf 100
+-- >>> buf
+-- TRingBuffer {capacity = 3, contents = [3,4,100] }
 overwritingPush :: TRingBuffer a -> a -> STM ()
 overwritingPush buf a = do
   !cap <- capacity' buf
@@ -392,6 +436,18 @@ overwritingPush buf a = do
 --
 -- This function is mainly useful for testing, or for draining
 -- remaining items during e.g. shutdown cleanup
+--
+--
+-- >>> buf <- STM.atomically $ TRingBuffer.empty 10 :: IO (TRingBuffer Int)
+-- >>> mapM_ (\x -> STM.atomically (tryPush buf x)) [0..10]
+-- >>> buf
+-- TRingBuffer {capacity = 10, contents = [0,1,2,3,4,5,6,7,8,9] }
+-- >>> STM.atomically (TRingBuffer.popAll buf)
+-- [0,1,2,3,4,5,6,7,8,9]
+-- >>> buf
+-- TRingBuffer {capacity = 10, contents = [] }
+-- >>> STM.atomically (TRingBuffer.popAll buf)
+-- []
 popAll :: TRingBuffer a -> STM [a]
 popAll buf = do
   mx <- tryPop buf
