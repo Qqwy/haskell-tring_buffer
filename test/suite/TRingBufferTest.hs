@@ -23,7 +23,7 @@ test_simple =
         buf <- liftIO $ TRingBuffer.emptyIO size
 
         for_ elems (STM.atomically . TRingBuffer.tryPush buf)
-        kept <- STM.atomically (yieldAll buf)
+        kept <- STM.atomically (TRingBuffer.popAll buf)
         kept === take (fromIntegral size) elems
 
     , testProperty "overwritingpush keeps latest X items" $ property $ do
@@ -32,7 +32,7 @@ test_simple =
         buf <- liftIO $ TRingBuffer.emptyIO size
 
         for_ elems (STM.atomically . TRingBuffer.overwritingPush buf)
-        kept <- STM.atomically (yieldAll buf)
+        kept <- STM.atomically (TRingBuffer.popAll buf)
         kept === reverse (take (fromIntegral size) (reverse elems))
 
     , testProperty "tryPop returns contents in order, and Nothing when buffer is empty" $ property $ do
@@ -74,10 +74,3 @@ test_concurrency =
 
         concurrently_ producer consumer
     ]
-
-yieldAll :: TRingBuffer a -> STM [a]
-yieldAll queue = do
-    i <- TRingBuffer.tryPop queue
-    case i of
-        Just x -> (x :) <$> yieldAll queue
-        Nothing -> pure []

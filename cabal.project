@@ -1,0 +1,7 @@
+packages: .
+tests: True
+
+write-ghc-environment-files: always
+
+package *
+  ghc-options: -msse4.2 -mavx -mbmi -mbmi2 -optc=-march=native -optc-mtune=native

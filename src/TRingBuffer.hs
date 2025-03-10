@@ -37,8 +37,12 @@ module TRingBuffer
     -- * Non-blocking (retry-less) interface
     , tryPush
     , tryPop
+    , popAll
     -- * Overwrite oldest element
     , overwritingPush
+    -- * Reading buffer contents without removing elements
+    , tryPeek
+    , peekAll
 )
 where
 
@@ -51,6 +55,10 @@ import Data.Array.Base (MArray)
 import Data.Ix (Ix)
 import Data.Array.Base qualified as Array
 import System.IO.Unsafe qualified
+
+-- $setup
+-- >>> import TRingBuffer qualified
+-- >>> import Control.Concurrent.STM qualified as STM
 
 -- | A Bounded Concurrent STM-based FIFO Queue, implemented as a Ring Buffer
 --
@@ -76,10 +84,18 @@ data Indexes = Indexes
   {-# UNPACK #-} !Word  -- ^ An up-to-date value
   {-# UNPACK #-} !Word -- ^A cached value, updated only when needed
 
-instance Show (TRingBuffer a) where
-    show buf = "TRingBuffer {capacity = " <> show (capacity buf) <> ", ...}"
+-- | This instance is useful for debugging and introspection
+-- but do not use it inside STM
+-- as it uses STM + `peekAll` under the hood.
+instance Show a => Show (TRingBuffer a) where
+    show buf = "TRingBuffer {capacity = " <> show (capacity buf) <> ", contents = " <> elems <> " }"
+      where
+        elems = show $ System.IO.Unsafe.unsafePerformIO $ STM.atomically (peekAll buf)
 
 -- | Create a new TRingBuffer with the given max `capacity`
+--
+-- >>> STM.atomically $ TRingBuffer.empty 4
+-- TRingBuffer {capacity = 4, contents = [] }
 empty :: Word -> STM (TRingBuffer a)
 {-# INLINABLE empty #-}
 empty cap = do
@@ -91,6 +107,9 @@ empty cap = do
   pure TRingBuffer{readerAndCachedWriter, writerAndCachedReader, contents}
 
 -- | Create a new TRingBuffer, directly in IO (outside of STM)
+--
+-- >>> TRingBuffer.emptyIO 100
+-- TRingBuffer {capacity = 100, contents = [] }
 emptyIO :: Word -> IO (TRingBuffer a)
 {-# INLINABLE emptyIO #-}
 emptyIO cap = do
@@ -114,6 +133,10 @@ emptyContents cap =
 --
 -- Non-blocking. A worst-case O(1) constant-time operation,
 -- uses no STM.
+--
+-- >>> buf <- TRingBuffer.emptyIO 100
+-- >>> TRingBuffer.capacity buf
+-- 100
 capacity :: TRingBuffer a -> Word
 {-# INLINABLE capacity #-}
 capacity buf = 
@@ -141,7 +164,28 @@ capacity' buf = fromIntegral <$> Array.getNumElements buf.contents
 --
 -- Most of the time, pushing can happen concurrently with popping.
 -- Assuming pushes and pops happen at the same rate (on average),
--- only one every `capacity / 2` pushes will synchronize with a pop.
+-- one every `capacity / 2` pushes will synchronize with a pop.
+--
+--
+-- >>> buf <- STM.atomically $ TRingBuffer.empty 3 :: IO (TRingBuffer Int)
+-- >>> buf
+-- TRingBuffer {capacity = 3, contents = [] }
+-- >>> STM.atomically $ TRingBuffer.tryPush buf 1
+-- True
+-- >>> buf
+-- TRingBuffer {capacity = 3, contents = [1] }
+-- >>> STM.atomically $ TRingBuffer.tryPush buf 2
+-- True
+-- >>> buf
+-- TRingBuffer {capacity = 3, contents = [1,2] }
+-- >>> STM.atomically $ TRingBuffer.tryPush buf 3
+-- True
+-- >>> buf
+-- TRingBuffer {capacity = 3, contents = [1,2,3] }
+-- >>> STM.atomically $ TRingBuffer.tryPush buf 4
+-- False
+-- >>> buf
+-- TRingBuffer {capacity = 3, contents = [1,2,3] }
 tryPush :: TRingBuffer a -> a -> STM Bool
 {-# INLINABLE tryPush #-}
 tryPush buf a = do
@@ -170,17 +214,18 @@ tryPush buf a = do
       TVar.writeTVar buf.writerAndCachedReader (Indexes newWriteIdx readIdx)
       pure True
 
--- | Attempts to grab the earliest-written element from the TRingBuffer.
+-- | Attempts to read-and-remove the earliest-written element from the TRingBuffer.
 -- 
 -- Returns `Nothing` if the buffer is empty.
+--
 -- Non-blocking. A worst-case O(1) constant-time operation.
 --
 -- Calls to `tryPop` are synchronized with any other concurrent calls to
--- `pop`/`tryPop` (using `STM.retry`)
+-- `pop`/`tryPop`/`peek` (using `STM.retry`)
 --
 -- Most of the time, popping can happen concurrently with pushing.
 -- Assuming pushes and pops happen at the same rate (on average),
--- only one every `capacity / 2` pops will synchronize with a push.
+-- one every `capacity / 2` pops will synchronize with a push.
 tryPop :: TRingBuffer a -> STM (Maybe a)
 {-# INLINABLE tryPop #-}
 tryPop buf = do
@@ -213,6 +258,58 @@ tryPop buf = do
       TVar.writeTVar buf.readerAndCachedWriter (Indexes newReadIdx writeIdx)
       pure (Just a)
 
+-- | Attempts to read the earliest-written element from the TRingBuffer, without removing it
+--
+-- Returns `Nothing` if the buffer is empty.
+--
+-- Non-blocking. A worst-case O(1) constant-time operation.
+--
+-- Calls to `tryPeek` are synchronized with any other concurrent calls to `pop`/`tryPop`
+tryPeek :: TRingBuffer a -> STM (Maybe a)
+{-# INLINABLE tryPeek #-}
+tryPeek buf = do
+  Indexes readIdx writeIdxCached <- TVar.readTVar buf.readerAndCachedWriter
+  if readIdx == writeIdxCached then do
+    -- Buffer may be empty, double-check with real write index
+    Indexes writeIdxFresh _ <- TVar.readTVar buf.writerAndCachedReader
+    if readIdx == writeIdxFresh then do
+        -- Buffer is truly empty, nothing more to do
+      pure Nothing
+    else do
+      -- Buffer not empty after all.
+      -- Peek
+      -- and also update the cached write idx
+      TVar.writeTVar buf.readerAndCachedWriter (Indexes readIdx writeIdxFresh)
+      actuallyPeek readIdx
+  else
+    actuallyPeek readIdx
+  where
+    actuallyPeek readIdx = do
+      a <- Array.readArray buf.contents readIdx
+      pure (Just a)
+
+-- | Reads the current contents of the buffer without removing any elements
+--
+-- This function is useful for debugging and introspection
+-- but it is not recommended to use in production situations;
+-- it will synchronize with any ongoing pushes/pops.
+peekAll :: TRingBuffer a -> STM ([a])
+{-# INLINABLE peekAll #-}
+peekAll buf = do
+  Indexes readIdx _ <- TVar.readTVar buf.readerAndCachedWriter
+  Indexes writeIdx _ <- TVar.readTVar buf.writerAndCachedReader
+  !cap <- capacity' buf
+  peekAll' cap readIdx writeIdx
+  where
+    peekAll' cap readIdx writeIdx = 
+      if readIdx == writeIdx then pure []
+      else do
+        a <- Array.readArray buf.contents readIdx
+        !as <- peekAll' cap (modularInc readIdx cap) writeIdx
+        pure (a : as)
+
+
+
 -- | Adds a new element to the TRingBuffer.
 --
 -- If the buffer is full, will block until there is space.
@@ -223,7 +320,7 @@ tryPop buf = do
 --
 -- Most of the time, pushing can happen concurrently with popping.
 -- Assuming pushes and pops happen at the same rate (on average),
--- only one every `capacity / 2` pushes will synchronize with a pop.
+-- one every `capacity / 2` pushes will synchronize with a pop.
 push :: TRingBuffer a -> a -> STM ()
 {-# INLINABLE push #-}
 push buf a = do
@@ -242,7 +339,7 @@ push buf a = do
 --
 -- Most of the time, popping can happen concurrently with pushing.
 -- Assuming pushes and pops happen at the same rate (on average),
--- only one every `capacity / 2` pops will synchronize with a push.
+-- one every `capacity / 2` pops will synchronize with a push.
 pop :: TRingBuffer a -> STM a
 {-# INLINABLE pop #-}
 pop buf = do 
@@ -253,6 +350,11 @@ pop buf = do
 
 -- | Similar to `push`, but instead of, when full, block-and-waiting for a `pop` to make space,
 -- the oldest value is immediately overwritten instead.
+--
+-- So e.g. in a buffer with capacity `4`,
+-- if it currently contains `[0,1,2,3]`
+-- and we `overwritingPush 42` into it,
+-- the `0` will be forgotten, and buffer will be updated to `[1,2,3,42]`
 --
 -- This function always synchronizes with other pushing operations.
 -- It will synchronize with popping operations iff the buffer is currently full.
@@ -286,6 +388,18 @@ overwritingPush buf a = do
       Array.writeArray buf.contents writeIdx a
       TVar.writeTVar buf.writerAndCachedReader (Indexes newWriteIdx readIdx)
 
+-- | Repeatedly calls `tryPop` until the buffer is empty
+--
+-- This function is mainly useful for testing, or for draining
+-- remaining items during e.g. shutdown cleanup
+popAll :: TRingBuffer a -> STM [a]
+popAll buf = do
+  mx <- tryPop buf
+  case mx of
+    Nothing -> pure []
+    Just x -> do
+      xs <- popAll buf
+      pure (x : xs)
 
 -- Used a single shared 'default' element
 -- that is used for empty spots in the array.
